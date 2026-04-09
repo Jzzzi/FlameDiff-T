@@ -1,0 +1,80 @@
+experiment:
+  name: combustion_diffusion
+  output_dir: outputs/diffusion
+  seed: 42
+
+data:
+  dataset_root: /mnt/bn/embodied-lf3-data/realpdebench
+  subset: real
+  window_size: 10
+  stride: 1
+  condition_indices: [0, 9]
+  target_indices: [1, 2, 3, 4, 5, 6, 7, 8]
+  splits:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  split_seed: 7
+  batch_size: 4
+  num_workers: 0
+  file_cache_size: 1
+  trajectory_cache_size: 2
+  normalization:
+    mode: minmax
+    min: 0.0
+    max: 1.0
+    eps: 1.0e-6
+    auto_compute: false
+
+model:
+  autoencoder:
+    checkpoint: outputs/autoencoder/checkpoints/best.pt
+    in_channels: 1
+    base_channels: 64
+    latent_channels: 8
+    channel_multipliers: [1, 2, 4]
+    dropout: 0.0
+  dit:
+    patch_size: 2
+    hidden_size: 512
+    depth: 8
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    num_frames: 10
+    target_frames: 8
+
+diffusion:
+  timesteps: 1000
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  clip_denoised: false
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+scheduler:
+  name: cosine
+  min_lr: 1.0e-6
+
+trainer:
+  epochs: 200
+  amp: true
+  precision: bf16
+  grad_clip_norm: 1.0
+  log_every_steps: 50
+  val_every_steps: 1000
+  interval_val_batches: 16
+  full_val_at_epoch_end: true
+  save_val_visuals: true
+  resume: null
+
+wandb:
+  enabled: false
+  project: combustion-tsr
+  entity: null
+  run_name: null
+  tags: [diffusion, combustion, temporal-super-resolution]
