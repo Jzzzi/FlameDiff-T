@@ -30,6 +30,7 @@ from tflamediff.engine.train_utils import (
     resolve_precision,
 )
 from tflamediff.models import FrameAutoencoder
+from tflamediff.utils.tensor import tensor_to_numpy
 from tflamediff.utils.visualization import save_sequence_strip
 from tflamediff.engine.logger import WandbLogger
 
@@ -105,8 +106,8 @@ def _run_validation(
             total_batches += 1
             if preview is None:
                 preview = {
-                    "gt": batch["sequence"][0].detach().cpu().numpy(),
-                    "recon": recon[0].detach().cpu().numpy(),
+                    "gt": tensor_to_numpy(batch["sequence"][0]),
+                    "recon": tensor_to_numpy(recon[0]),
                 }
             if max_batches is not None and total_batches >= max_batches:
                 break

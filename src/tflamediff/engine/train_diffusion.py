@@ -37,6 +37,7 @@ from tflamediff.engine.train_utils import (
     resolve_precision,
 )
 from tflamediff.engine.logger import WandbLogger
+from tflamediff.utils.tensor import tensor_to_numpy
 from tflamediff.utils.visualization import save_comparison_strip
 
 
@@ -112,10 +113,10 @@ def _run_validation(
             total_loss += metrics["loss"]
             total_batches += 1
             if preview is None:
-                decoded = decode_sequence(autoencoder, extras["predicted_x0"][:1]).detach().cpu().numpy()
+                decoded = tensor_to_numpy(decode_sequence(autoencoder, extras["predicted_x0"][:1]))
                 preview = {
-                    "condition": extras["condition"][:1].detach().cpu().numpy()[0],
-                    "target": extras["target"][:1].detach().cpu().numpy()[0],
+                    "condition": tensor_to_numpy(extras["condition"][:1])[0],
+                    "target": tensor_to_numpy(extras["target"][:1])[0],
                     "prediction": decoded[0],
                 }
             if max_batches is not None and total_batches >= max_batches:

@@ -22,6 +22,7 @@ from tflamediff.engine.interpolation import (
 )
 from tflamediff.utils.io import load_frame_file
 from tflamediff.utils.seed import seed_everything
+from tflamediff.utils.tensor import tensor_to_numpy
 from tflamediff.utils.visualization import save_comparison_strip, save_gif, save_sequence_strip, save_video
 
 
@@ -74,7 +75,7 @@ def main() -> None:
     else:
         sample = bundle["datasets"][args.split][args.sample_index]
         condition = sample["condition"].unsqueeze(0)
-        target = sample["target"].numpy()
+        target = tensor_to_numpy(sample["target"])
         metadata.update(
             {
                 "trajectory_id": sample["trajectory_id"],
@@ -91,7 +92,8 @@ def main() -> None:
             diffusion=diffusion,
             condition_frames=condition,
             device=device,
-        )[0].detach().cpu().numpy()
+        )[0]
+        full_prediction = tensor_to_numpy(full_prediction)
 
     denorm_prediction = normalizer.denormalize(full_prediction)
     np.save(output_dir / "prediction.npy", denorm_prediction)
@@ -105,7 +107,7 @@ def main() -> None:
 
     if target is not None:
         denorm_target = normalizer.denormalize(target)
-        denorm_condition = normalizer.denormalize(condition[0].numpy())
+        denorm_condition = normalizer.denormalize(tensor_to_numpy(condition[0]))
         save_comparison_strip(
             condition=denorm_condition,
             prediction=denorm_prediction[1:-1],
@@ -119,4 +121,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

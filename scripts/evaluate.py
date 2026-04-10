@@ -24,6 +24,7 @@ from tflamediff.engine.interpolation import (
 from tflamediff.utils.io import write_csv
 from tflamediff.utils.metrics import average_metric_dicts, compute_sequence_metrics
 from tflamediff.utils.seed import seed_everything
+from tflamediff.utils.tensor import tensor_to_numpy
 from tflamediff.utils.visualization import save_comparison_strip, save_gif
 
 
@@ -91,10 +92,11 @@ def main() -> None:
             diffusion=diffusion,
             condition_frames=condition,
             device=device,
-        ).detach().cpu().numpy()
+        )
+        full_prediction = tensor_to_numpy(full_prediction)
         pred_target = full_prediction[:, 1:-1]
-        target = batch["target"].numpy()
-        condition_np = batch["condition"].numpy()
+        target = tensor_to_numpy(batch["target"])
+        condition_np = tensor_to_numpy(batch["condition"])
 
         for sample_offset in range(pred_target.shape[0]):
             if args.max_samples is not None and len(metrics_rows) >= args.max_samples:

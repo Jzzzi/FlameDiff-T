@@ -15,8 +15,8 @@ data:
     val: 0.15
     test: 0.15
   split_seed: 7
-  batch_size: 8
-  num_workers: 0
+  batch_size: 32
+  num_workers: 8
   file_cache_size: 1
   trajectory_cache_size: 2
   normalization:
