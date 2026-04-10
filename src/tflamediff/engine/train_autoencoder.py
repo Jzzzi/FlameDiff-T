@@ -31,7 +31,7 @@ from tflamediff.engine.train_utils import (
 )
 from tflamediff.models import FrameAutoencoder
 from tflamediff.utils.tensor import tensor_to_numpy
-from tflamediff.utils.visualization import save_sequence_strip
+from tflamediff.utils.visualization import save_reconstruction_comparison_strip, save_sequence_strip
 from tflamediff.engine.logger import WandbLogger
 
 
@@ -138,17 +138,32 @@ def _save_validation_visuals(
 ) -> dict[str, Any]:
     if preview is None:
         return {}
+    gt = normalizer.denormalize(preview["gt"])
+    recon = normalizer.denormalize(preview["recon"])
+    shared_vmin = float(min(gt.min(), recon.min()))
+    shared_vmax = float(max(gt.max(), recon.max()))
     gt_image = save_sequence_strip(
-        normalizer.denormalize(preview["gt"]),
+        gt,
         output_paths["visuals"] / f"{tag}_gt.png",
         title=f"Autoencoder Ground Truth ({tag})",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
     )
     recon_image = save_sequence_strip(
-        normalizer.denormalize(preview["recon"]),
+        recon,
         output_paths["visuals"] / f"{tag}_recon.png",
         title=f"Autoencoder Reconstruction ({tag})",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
     )
-    return {"gt": gt_image, "recon": recon_image}
+    comparison_image = save_reconstruction_comparison_strip(
+        target=gt,
+        reconstruction=recon,
+        path=output_paths["visuals"] / f"{tag}_comparison.png",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
+    )
+    return {"gt": gt_image, "recon": recon_image, "comparison": comparison_image}
 
 
 def _run_and_log_validation(
@@ -257,6 +272,10 @@ def _run_and_log_validation(
                 "val_visual/recon": wandb_logger.image(
                     visual_images["recon"],
                     caption=f"AE Recon | trigger={trigger} | epoch={epoch} | step={global_step}",
+                ),
+                "val_visual/comparison": wandb_logger.image(
+                    visual_images["comparison"],
+                    caption=f"AE Comparison | trigger={trigger} | epoch={epoch} | step={global_step}",
                 ),
             }
             wandb_logger.log(wandb_payload, step=global_step)

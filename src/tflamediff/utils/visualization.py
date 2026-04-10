@@ -21,6 +21,8 @@ def render_sequence_strip(
     sequence: np.ndarray,
     title: str | None = None,
     cmap: str = "inferno",
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> np.ndarray:
     sequence = np.asarray(sequence)
     if sequence.ndim == 4 and sequence.shape[1] == 1:
@@ -30,7 +32,7 @@ def render_sequence_strip(
     if frames == 1:
         axes = [axes]
     for axis, frame_index in zip(axes, range(frames)):
-        axis.imshow(sequence[frame_index], cmap=cmap)
+        axis.imshow(sequence[frame_index], cmap=cmap, vmin=vmin, vmax=vmax)
         axis.set_title(f"t={frame_index}")
         axis.axis("off")
     if title:
@@ -46,8 +48,10 @@ def save_sequence_strip(
     path: str | Path,
     title: str | None = None,
     cmap: str = "inferno",
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> np.ndarray:
-    image = render_sequence_strip(sequence=sequence, title=title, cmap=cmap)
+    image = render_sequence_strip(sequence=sequence, title=title, cmap=cmap, vmin=vmin, vmax=vmax)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(image).save(target)
@@ -59,6 +63,8 @@ def render_comparison_strip(
     prediction: np.ndarray,
     target: np.ndarray,
     cmap: str = "inferno",
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> np.ndarray:
     condition = np.asarray(condition)
     prediction = np.asarray(prediction)
@@ -81,7 +87,10 @@ def render_comparison_strip(
     for row_index in range(3):
         for frame_index in range(num_frames):
             axis = axes[row_index, frame_index]
-            axis.imshow(rows[row_index][frame_index], cmap=cmap)
+            if row_index < 2:
+                axis.imshow(rows[row_index][frame_index], cmap=cmap, vmin=vmin, vmax=vmax)
+            else:
+                axis.imshow(rows[row_index][frame_index], cmap=cmap)
             if row_index == 0:
                 axis.set_title(f"t={frame_index}")
             if frame_index == 0:
@@ -99,13 +108,59 @@ def save_comparison_strip(
     target: np.ndarray,
     path: str | Path,
     cmap: str = "inferno",
+    vmin: float | None = None,
+    vmax: float | None = None,
 ) -> np.ndarray:
     image = render_comparison_strip(
         condition=condition,
         prediction=prediction,
         target=target,
         cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
     )
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(image).save(target_path)
+    return image
+
+
+def save_reconstruction_comparison_strip(
+    target: np.ndarray,
+    reconstruction: np.ndarray,
+    path: str | Path,
+    cmap: str = "inferno",
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> np.ndarray:
+    target = np.asarray(target)
+    reconstruction = np.asarray(reconstruction)
+    if target.ndim == 4 and target.shape[1] == 1:
+        target = target[:, 0]
+    if reconstruction.ndim == 4 and reconstruction.shape[1] == 1:
+        reconstruction = reconstruction[:, 0]
+
+    diff = np.abs(target - reconstruction)
+    num_frames = target.shape[0]
+    figure, axes = plt.subplots(3, num_frames, figsize=(1.8 * num_frames, 6))
+    rows = [target, reconstruction, diff]
+    row_titles = ["Ground Truth", "Reconstruction", "Absolute Error"]
+    for row_index in range(3):
+        for frame_index in range(num_frames):
+            axis = axes[row_index, frame_index]
+            if row_index < 2:
+                axis.imshow(rows[row_index][frame_index], cmap=cmap, vmin=vmin, vmax=vmax)
+            else:
+                axis.imshow(rows[row_index][frame_index], cmap=cmap)
+            if row_index == 0:
+                axis.set_title(f"t={frame_index}")
+            if frame_index == 0:
+                axis.set_ylabel(row_titles[row_index])
+            axis.axis("off")
+    figure.tight_layout()
+    image = _figure_to_rgb_array(figure)
+    plt.close(figure)
+
     target_path = Path(path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(image).save(target_path)

@@ -143,11 +143,18 @@ def _save_validation_visuals(
 ) -> dict[str, Any]:
     if preview is None:
         return {}
+    condition = normalizer.denormalize(preview["condition"])
+    prediction = normalizer.denormalize(preview["prediction"])
+    target = normalizer.denormalize(preview["target"])
+    shared_vmin = float(min(condition.min(), prediction.min(), target.min()))
+    shared_vmax = float(max(condition.max(), prediction.max(), target.max()))
     comparison_image = save_comparison_strip(
-        normalizer.denormalize(preview["condition"]),
-        normalizer.denormalize(preview["prediction"]),
-        normalizer.denormalize(preview["target"]),
+        condition,
+        prediction,
+        target,
         output_paths["visuals"] / f"{tag}_preview.png",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
     )
     return {"comparison": comparison_image}
 
