@@ -85,7 +85,7 @@ def sample_sequence(
     condition_latents = encode_sequence(autoencoder, condition_frames)
     target_shape = (
         condition_frames.shape[0],
-        8,
+        unwrap_target_frames(flow_model),
         condition_latents.shape[2],
         condition_latents.shape[3],
         condition_latents.shape[4],
@@ -98,3 +98,8 @@ def sample_sequence(
     )
     predicted_frames = decode_sequence(autoencoder, predicted_target_latents)
     return torch.cat([condition_frames[:, :1], predicted_frames, condition_frames[:, 1:2]], dim=1)
+
+
+def unwrap_target_frames(flow_model: ConditionalLatentDiT) -> int:
+    model = flow_model.module if hasattr(flow_model, "module") else flow_model
+    return int(model.target_frames)

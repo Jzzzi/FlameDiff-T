@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from contextlib import nullcontext
 from typing import Any
 
@@ -94,11 +95,14 @@ def _run_validation(
     amp_dtype: torch.dtype | None,
     context: DistributedContext,
     max_batches: int | None = None,
+    visual_num_samples: int = 1,
 ) -> tuple[dict[str, float], dict[str, Any] | None]:
     flow_model.eval()
     total_loss = 0.0
     total_batches = 0
-    preview = None
+    previews: list[dict[str, Any]] = []
+    seen_samples = 0
+    visual_num_samples = max(1, int(visual_num_samples))
     with torch.no_grad():
         for batch in loader:
             batch = move_batch_to_device(batch, device)
@@ -113,42 +117,50 @@ def _run_validation(
             )
             total_loss += metrics["loss"]
             total_batches += 1
-            if preview is None:
-                preview = {
-                    "condition": tensor_to_numpy(extras["condition"][:1])[0],
-                    "target": tensor_to_numpy(extras["target"][:1])[0],
-                }
+            conditions = tensor_to_numpy(extras["condition"])
+            targets = tensor_to_numpy(extras["target"])
+            for condition, target in zip(conditions, targets, strict=False):
+                preview = {"condition": condition, "target": target}
+                seen_samples += 1
+                if len(previews) < visual_num_samples:
+                    previews.append(preview)
+                    continue
+                replace_index = random.randrange(seen_samples)
+                if replace_index < visual_num_samples:
+                    previews[replace_index] = preview
             if max_batches is not None and total_batches >= max_batches:
                 break
     metrics = {"loss": reduce_scalar(total_loss / max(total_batches, 1), context)}
     flow_model.train()
-    return metrics, preview
+    return metrics, {"previews": previews}
 
 
 @torch.no_grad()
-def _sample_validation_preview(
+def _sample_validation_previews(
     *,
     flow_model,
     autoencoder,
     flow,
-    preview: dict[str, Any] | None,
+    previews: list[dict[str, Any]],
     device: str,
     amp_enabled: bool,
     amp_dtype: torch.dtype | None,
-) -> dict[str, Any] | None:
-    if preview is None:
-        return None
+) -> list[dict[str, Any]]:
+    if not previews:
+        return []
 
     was_training = flow_model.training
     flow_model.eval()
     autoencoder.eval()
 
-    condition = torch.from_numpy(preview["condition"][None]).to(device=device, dtype=torch.float32)
+    condition = torch.from_numpy(
+        np.stack([preview["condition"] for preview in previews], axis=0)
+    ).to(device=device, dtype=torch.float32)
     with _autocast_context(device, amp_enabled, amp_dtype):
         condition_latents = encode_sequence(autoencoder, condition)
         target_shape = (
             condition.shape[0],
-            int(preview["target"].shape[0]),
+            int(previews[0]["target"].shape[0]),
             condition_latents.shape[2],
             condition_latents.shape[3],
             condition_latents.shape[4],
@@ -163,11 +175,15 @@ def _sample_validation_preview(
 
     if was_training:
         flow_model.train()
-    return {
-        "condition": preview["condition"],
-        "target": preview["target"],
-        "prediction": tensor_to_numpy(prediction)[0],
-    }
+    predictions = tensor_to_numpy(prediction)
+    return [
+        {
+            "condition": preview["condition"],
+            "target": preview["target"],
+            "prediction": predictions[index],
+        }
+        for index, preview in enumerate(previews)
+    ]
 
 
 def train(config: dict[str, Any]) -> None:
@@ -178,7 +194,7 @@ def train(config: dict[str, Any]) -> None:
         cleanup_distributed()
 
 
-def _save_validation_visuals(
+def _save_validation_visual(
     *,
     preview: dict[str, Any] | None,
     normalizer,
@@ -224,6 +240,29 @@ def _save_validation_visuals(
     return {"gt": gt_image, "sample": sample_image, "comparison": comparison_image}, sample_metrics
 
 
+def _save_validation_visuals(
+    *,
+    previews: list[dict[str, Any]],
+    normalizer,
+    output_paths,
+    tag: str,
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    visual_images: list[dict[str, Any]] = []
+    first_sample_metrics: dict[str, float] = {}
+    for sample_index, preview in enumerate(previews):
+        images, sample_metrics = _save_validation_visual(
+            preview=preview,
+            normalizer=normalizer,
+            output_paths=output_paths,
+            tag=f"{tag}_sample_{sample_index:02d}" if len(previews) > 1 else tag,
+        )
+        if images:
+            visual_images.append(images)
+            if sample_index == 0:
+                first_sample_metrics = sample_metrics
+    return visual_images, first_sample_metrics
+
+
 def _run_and_log_validation(
     *,
     flow_model,
@@ -250,6 +289,7 @@ def _run_and_log_validation(
     max_batches: int | None,
     save_visuals: bool,
     sample_val_visuals: bool,
+    visual_num_samples: int,
 ) -> float:
     val_metrics, preview = _run_validation(
         flow_model=flow_model,
@@ -261,23 +301,25 @@ def _run_and_log_validation(
         amp_dtype=amp_dtype,
         context=context,
         max_batches=max_batches,
+        visual_num_samples=visual_num_samples,
     )
     barrier(context)
-    visual_images: dict[str, Any] = {}
+    visual_images: list[dict[str, Any]] = []
     sample_metrics: dict[str, float] = {}
     if is_main_process(context) and save_visuals and sample_val_visuals:
         tag = f"flow_{trigger}_epoch_{epoch:04d}_step_{global_step:08d}"
-        sampled_preview = _sample_validation_preview(
+        previews = preview.get("previews", []) if preview is not None else []
+        sampled_previews = _sample_validation_previews(
             flow_model=flow_model,
             autoencoder=autoencoder,
             flow=flow,
-            preview=preview,
+            previews=previews,
             device=device,
             amp_enabled=amp_enabled,
             amp_dtype=amp_dtype,
         )
         visual_images, sample_metrics = _save_validation_visuals(
-            preview=sampled_preview,
+            previews=sampled_previews,
             normalizer=normalizer,
             output_paths=output_paths,
             tag=tag,
@@ -338,23 +380,38 @@ def _run_and_log_validation(
             extra={"best_val": best_val},
         )
     if wandb_logger is not None and visual_images:
-        wandb_logger.log(
-            {
-                "val_visual/gt": wandb_logger.image(
-                    visual_images["gt"],
-                    caption=f"Flow Matching GT | trigger={trigger} | epoch={epoch} | step={global_step}",
+        wandb_images = {}
+        for sample_index, images in enumerate(visual_images):
+            sample_key = f"sample_{sample_index:02d}"
+            gt_image = wandb_logger.image(
+                images["gt"],
+                caption=(
+                    f"Flow Matching GT | {sample_key} | trigger={trigger} "
+                    f"| epoch={epoch} | step={global_step}"
                 ),
-                "val_visual/sample": wandb_logger.image(
-                    visual_images["sample"],
-                    caption=f"Flow Matching Sample | trigger={trigger} | epoch={epoch} | step={global_step}",
+            )
+            sample_image = wandb_logger.image(
+                images["sample"],
+                caption=(
+                    f"Flow Matching Sample | {sample_key} | trigger={trigger} "
+                    f"| epoch={epoch} | step={global_step}"
                 ),
-                "val_visual/comparison": wandb_logger.image(
-                    visual_images["comparison"],
-                    caption=f"Flow Matching Comparison | trigger={trigger} | epoch={epoch} | step={global_step}",
+            )
+            comparison_image = wandb_logger.image(
+                images["comparison"],
+                caption=(
+                    f"Flow Matching Comparison | {sample_key} | trigger={trigger} "
+                    f"| epoch={epoch} | step={global_step}"
                 ),
-            },
-            step=global_step,
-        )
+            )
+            wandb_images[f"val_visual/{sample_key}/gt"] = gt_image
+            wandb_images[f"val_visual/{sample_key}/sample"] = sample_image
+            wandb_images[f"val_visual/{sample_key}/comparison"] = comparison_image
+            if sample_index == 0:
+                wandb_images["val_visual/gt"] = gt_image
+                wandb_images["val_visual/sample"] = sample_image
+                wandb_images["val_visual/comparison"] = comparison_image
+        wandb_logger.log(wandb_images, step=global_step)
     barrier(context)
     return best_val
 
@@ -389,6 +446,8 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         drop_last=False,
         prefetch_factor=prefetch_factor,
     )
+    if len(train_loader) == 0:
+        raise ValueError("Train dataloader is empty; reduce data.batch_size or disable drop_last.")
 
     device = context.device
     autoencoder = build_autoencoder(config).to(device)
@@ -407,11 +466,18 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         )
 
     optimizer = build_optimizer(flow_model.parameters(), config["optimizer"])
-    scheduler = build_scheduler(optimizer, config.get("scheduler", {"name": "none"}), int(config["trainer"]["epochs"]))
+    trainer_config = config["trainer"]
+    max_steps = int(trainer_config.get("max_steps", 0) or 0)
+    if max_steps <= 0:
+        legacy_epochs = int(trainer_config.get("epochs", 1))
+        max_steps = legacy_epochs * max(len(train_loader), 1)
+        trainer_config["max_steps"] = max_steps
+    if max_steps <= 0:
+        raise ValueError("trainer.max_steps must be positive.")
+    scheduler = build_scheduler(optimizer, config.get("scheduler", {"name": "none"}), max_steps)
     amp_enabled, amp_dtype = resolve_precision(config["trainer"])
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and device.startswith("cuda"))
 
-    start_epoch = 0
     global_step = 0
     best_val = float("inf")
     resume_path = config["trainer"].get("resume")
@@ -424,9 +490,10 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
             scaler=scaler,
             map_location=device,
         )
-        start_epoch = int(checkpoint.get("epoch", 0)) + 1
         global_step = int(checkpoint.get("step", 0))
         best_val = float(checkpoint.get("extra", {}).get("best_val", best_val))
+    steps_per_epoch = max(len(train_loader), 1)
+    epoch = global_step // steps_per_epoch
 
     logger = JsonlLogger(output_paths["logs"] / "flow_matching_train.jsonl")
     writer = maybe_build_summary_writer(output_paths["logs"]) if is_main_process(context) else None
@@ -439,56 +506,109 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
     full_val_at_epoch_end = bool(config["trainer"].get("full_val_at_epoch_end", True))
     save_val_visuals = bool(config["trainer"].get("save_val_visuals", True))
     sample_val_visuals = bool(config["trainer"].get("sample_val_visuals", save_val_visuals))
+    val_visual_num_samples = int(config["trainer"].get("val_visual_num_samples", 5))
 
-    for epoch in range(start_epoch, int(config["trainer"]["epochs"])):
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
-        flow_model.train()
-        progress = tqdm(train_loader, disable=not is_main_process(context), desc=f"Flow epoch {epoch}")
-        last_interval_validation_step = -1
-        for batch in progress:
-            batch = move_batch_to_device(batch, device)
-            optimizer.zero_grad(set_to_none=True)
-            loss, metrics, _ = _compute_loss(
-                flow_model=flow_model,
-                autoencoder=autoencoder,
-                flow=flow,
-                batch=batch,
-                device=device,
-                amp_enabled=amp_enabled,
-                amp_dtype=amp_dtype,
-            )
-            scaler.scale(loss).backward()
-            if grad_clip > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(flow_model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-            global_step += 1
+    progress = tqdm(
+        total=max_steps,
+        initial=min(global_step, max_steps),
+        disable=not is_main_process(context),
+        desc="Flow train",
+        dynamic_ncols=True,
+    )
+    try:
+        while global_step < max_steps:
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            flow_model.train()
+            last_interval_validation_step = -1
+            reached_max_steps = False
+            for batch in train_loader:
+                if global_step >= max_steps:
+                    reached_max_steps = True
+                    break
+                batch = move_batch_to_device(batch, device)
+                optimizer.zero_grad(set_to_none=True)
+                loss, metrics, _ = _compute_loss(
+                    flow_model=flow_model,
+                    autoencoder=autoencoder,
+                    flow=flow,
+                    batch=batch,
+                    device=device,
+                    amp_enabled=amp_enabled,
+                    amp_dtype=amp_dtype,
+                )
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(flow_model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                global_step += 1
+                if scheduler is not None:
+                    scheduler.step()
+                progress.update(1)
+                progress.set_postfix(
+                    epoch=epoch,
+                    loss=f"{metrics['loss']:.6f}",
+                    lr=f"{current_learning_rate(optimizer):.3e}",
+                )
 
-            if is_main_process(context) and global_step % log_every == 0:
-                payload = {
-                    "phase": "train",
-                    "epoch": epoch,
-                    "step": global_step,
-                    "loss": metrics["loss"],
-                    "lr": current_learning_rate(optimizer),
-                }
-                logger.log(payload)
-                if wandb_logger is not None:
-                    wandb_logger.log(
-                        {
-                            "train/loss": metrics["loss"],
-                            "train/lr": current_learning_rate(optimizer),
-                            "epoch": epoch,
-                        },
-                        step=global_step,
+                if is_main_process(context) and global_step % log_every == 0:
+                    payload = {
+                        "phase": "train",
+                        "epoch": epoch,
+                        "step": global_step,
+                        "loss": metrics["loss"],
+                        "lr": current_learning_rate(optimizer),
+                    }
+                    logger.log(payload)
+                    if wandb_logger is not None:
+                        wandb_logger.log(
+                            {
+                                "train/loss": metrics["loss"],
+                                "train/lr": current_learning_rate(optimizer),
+                                "epoch": epoch,
+                            },
+                            step=global_step,
+                        )
+                    if writer is not None:
+                        writer.add_scalar("train/loss", metrics["loss"], global_step)
+
+                if val_every_steps > 0 and global_step % val_every_steps == 0:
+                    best_val = _run_and_log_validation(
+                        flow_model=flow_model,
+                        autoencoder=autoencoder,
+                        flow=flow,
+                        loader=val_loader,
+                        device=device,
+                        amp_enabled=amp_enabled,
+                        amp_dtype=amp_dtype,
+                        context=context,
+                        logger=logger,
+                        writer=writer,
+                        wandb_logger=wandb_logger,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        output_paths=output_paths,
+                        config=config,
+                        normalizer=normalizer,
+                        epoch=epoch,
+                        global_step=global_step,
+                        best_val=best_val,
+                        trigger="step",
+                        max_batches=interval_val_batches,
+                        save_visuals=save_val_visuals,
+                        sample_val_visuals=sample_val_visuals,
+                        visual_num_samples=val_visual_num_samples,
                     )
-                if writer is not None:
-                    writer.add_scalar("train/loss", metrics["loss"], global_step)
-                progress.set_postfix(loss=f"{metrics['loss']:.6f}")
+                    last_interval_validation_step = global_step
+                    flow_model.train()
 
-            if val_every_steps > 0 and global_step % val_every_steps == 0:
+            reached_max_steps = reached_max_steps or global_step >= max_steps
+            if full_val_at_epoch_end and not reached_max_steps and not (
+                last_interval_validation_step == global_step and interval_val_batches is None
+            ):
                 best_val = _run_and_log_validation(
                     flow_model=flow_model,
                     autoencoder=autoencoder,
@@ -510,45 +630,15 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
                     epoch=epoch,
                     global_step=global_step,
                     best_val=best_val,
-                    trigger="step",
-                    max_batches=interval_val_batches,
+                    trigger="epoch",
+                    max_batches=None,
                     save_visuals=save_val_visuals,
                     sample_val_visuals=sample_val_visuals,
+                    visual_num_samples=val_visual_num_samples,
                 )
-                last_interval_validation_step = global_step
-                flow_model.train()
-
-        if scheduler is not None:
-            scheduler.step()
-        if full_val_at_epoch_end and not (
-            last_interval_validation_step == global_step and interval_val_batches is None
-        ):
-            best_val = _run_and_log_validation(
-                flow_model=flow_model,
-                autoencoder=autoencoder,
-                flow=flow,
-                loader=val_loader,
-                device=device,
-                amp_enabled=amp_enabled,
-                amp_dtype=amp_dtype,
-                context=context,
-                logger=logger,
-                writer=writer,
-                wandb_logger=wandb_logger,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                output_paths=output_paths,
-                config=config,
-                normalizer=normalizer,
-                epoch=epoch,
-                global_step=global_step,
-                best_val=best_val,
-                trigger="epoch",
-                max_batches=None,
-                save_visuals=save_val_visuals,
-                sample_val_visuals=sample_val_visuals,
-            )
+            epoch += 1
+    finally:
+        progress.close()
     if writer is not None:
         writer.close()
     if wandb_logger is not None:

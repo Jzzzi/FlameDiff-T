@@ -27,7 +27,7 @@ from tflamediff.utils.visualization import save_comparison_strip, save_gif, save
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run temporal interpolation from frame 0 and frame 9.")
+    parser = argparse.ArgumentParser(description="Run temporal interpolation from two endpoint frames.")
     parser.add_argument("--config", type=str, required=True, help="Path to flow matching YAML config.")
     parser.add_argument("--flow-checkpoint", type=str, required=True, help="Path to flow checkpoint.")
     parser.add_argument("--autoencoder-checkpoint", type=str, default=None, help="Override autoencoder checkpoint path.")
@@ -97,7 +97,7 @@ def main() -> None:
 
     denorm_prediction = normalizer.denormalize(full_prediction)
     np.save(output_dir / "prediction.npy", denorm_prediction)
-    save_sequence_strip(denorm_prediction, output_dir / "prediction_strip.png", title="Predicted 10-frame sequence")
+    save_sequence_strip(denorm_prediction, output_dir / "prediction_strip.png", title="Predicted sequence")
     save_gif(denorm_prediction, output_dir / "prediction.gif")
     if not args.skip_video:
         try:

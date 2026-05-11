@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import random
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -248,13 +247,11 @@ class CombustionWindowDataset(Dataset):
 
 
 def split_trajectories(
-    sim_ids: list[str], split_ratios: dict[str, float], seed: int
+    sim_ids: list[str], split_ratios: dict[str, float]
 ) -> dict[str, list[str]]:
     if not math.isclose(sum(split_ratios.values()), 1.0, rel_tol=1e-6, abs_tol=1e-6):
         raise ValueError(f"Split ratios must sum to 1.0, got: {split_ratios}")
     sim_ids = sorted(sim_ids)
-    rng = random.Random(seed)
-    rng.shuffle(sim_ids)
 
     total = len(sim_ids)
     train_end = int(total * split_ratios["train"])
@@ -280,11 +277,13 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
         trajectory_cache_size=data_config.get("trajectory_cache_size", 2),
     )
     sim_ids = store.list_sim_ids()
-    split_ids = split_trajectories(
-        sim_ids=sim_ids,
-        split_ratios=data_config.get("splits", {"train": 0.7, "val": 0.15, "test": 0.15}),
-        seed=int(data_config.get("split_seed", 0)),
-    )
+    if bool(data_config.get("split_sets", False)):
+        split_ids = split_trajectories(
+            sim_ids=sim_ids,
+            split_ratios=data_config.get("splits", {"train": 0.7, "val": 0.15, "test": 0.15}),
+        )
+    else:
+        split_ids = {"train": sim_ids, "val": sim_ids, "test": sim_ids}
     preload_splits = set(data_config.get("preload_splits", []))
     preload_limit = data_config.get("preload_max_trajectories")
     preload_limit = None if preload_limit in {None, 0} else int(preload_limit)

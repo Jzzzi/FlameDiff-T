@@ -145,17 +145,20 @@ python scripts/evaluate.py \
 
 - `data.dataset_root`: RealPDEBench 根目录
 - `data.window_size` / `data.stride`: 切窗长度和步长
-- `data.splits`: trajectory 级别切分比例
+- `data.split_sets`: 是否按 trajectory 划分 train/val/test；默认 `false` 表示全量数据用于训练，并在训练集上 validation
+- `data.splits`: `data.split_sets=true` 时使用的 trajectory 级别切分比例
 - `data.normalization`: 归一化模式和参数
 - `model.autoencoder.*`: AE 编解码器结构
 - `model.dit.*`: latent DiT 的 patch、宽度、层数、头数
 - `flow_matching.*`: rectified flow 的训练时间采样、采样步数和时间嵌入缩放
+- `trainer.max_steps`: flow matching 训练的总 optimizer step 数
 - `trainer.resume`: 从 `last.pt` 恢复训练
 - `trainer.precision`: `fp32` / `fp16` / `bf16`
 - `trainer.val_every_steps`: 每隔多少个训练 step 触发一次中途 validation，`0` 表示关闭
-- `trainer.interval_val_batches`: 中途 validation 最多跑多少个 val batch，避免过于频繁时开销过大；epoch 末 validation 仍可跑完整验证集
-- `trainer.full_val_at_epoch_end`: 是否在每个 epoch 结束时跑完整 validation
+- `trainer.interval_val_batches`: 中途 validation 最多跑多少个 val batch，避免过于频繁时开销过大
+- `trainer.full_val_at_epoch_end`: 是否在每次完整扫过 train loader 后跑完整 validation
 - `trainer.save_val_visuals`: 是否在 validation 时保存重建/插值可视化
+- `trainer.val_visual_num_samples`: 每次 validation 随机保存/上传多少个可视化样本
 - `experiment.output_dir`: 当前实验输出目录
 - `wandb.*`: WandB 项目、实体、run name 和开关
 

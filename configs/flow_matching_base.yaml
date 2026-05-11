@@ -10,11 +10,11 @@ data:
   stride: 1
   condition_indices: [0, 9]
   target_indices: [1, 2, 3, 4, 5, 6, 7, 8]
+  split_sets: false
   splits:
     train: 0.7
     val: 0.15
     test: 0.15
-  split_seed: 7
   batch_size: 96
   num_workers: 8
   prefetch_factor: 8
@@ -63,16 +63,17 @@ scheduler:
   min_lr: 1.0e-6
 
 trainer:
-  epochs: 200000000
+  max_steps: 20000000
   amp: true
   precision: bf16
   grad_clip_norm: 1.0
   log_every_steps: 50
-  val_every_steps: 1000
+  val_every_steps: 500
   interval_val_batches: 16
   full_val_at_epoch_end: false
   save_val_visuals: true
   sample_val_visuals: true
+  val_visual_num_samples: 5
   resume: null
 
 wandb:

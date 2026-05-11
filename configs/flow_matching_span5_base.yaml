@@ -1,21 +1,21 @@
 experiment:
-  name: combustion_autoencoder
-  output_dir: outputs/autoencoder
+  name: combustion_flow_span5
+  output_dir: outputs/flow_span5
   seed: 42
 
 data:
   dataset_root: /mnt/bn/embodied-lf3-data/realpdebench
   subset: real
-  window_size: 10
-  stride: 1
-  condition_indices: [0, 9]
-  target_indices: [1, 2, 3, 4, 5, 6, 7, 8]
+  window_size: 5
+  stride: 5
+  condition_indices: [0, 4]
+  target_indices: [1, 2, 3]
   split_sets: false
   splits:
     train: 0.7
     val: 0.15
     test: 0.15
-  batch_size: 32
+  batch_size: 192
   num_workers: 8
   prefetch_factor: 8
   file_cache_size: 1
@@ -31,15 +31,26 @@ data:
 
 model:
   autoencoder:
+    checkpoint: results/autoencoder/combustion-ae-v0/checkpoints/best.pt
     in_channels: 1
     base_channels: 64
     latent_channels: 8
     channel_multipliers: [1, 2, 4]
     dropout: 0.0
+  dit:
+    patch_size: 2
+    hidden_size: 512
+    depth: 8
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+    num_frames: 5
+    target_frames: 3
 
-loss:
-  recon_weight: 1.0
-  l1_weight: 0.1
+flow_matching:
+  sample_steps: 100
+  train_eps: 1.0e-5
+  time_scale: 1000.0
 
 optimizer:
   name: adamw
@@ -52,15 +63,17 @@ scheduler:
   min_lr: 1.0e-6
 
 trainer:
-  epochs: 100
+  max_steps: 20000000
   amp: true
   precision: bf16
   grad_clip_norm: 1.0
   log_every_steps: 50
-  val_every_steps: 1000
+  val_every_steps: 500
   interval_val_batches: 16
-  full_val_at_epoch_end: true
+  full_val_at_epoch_end: false
   save_val_visuals: true
+  sample_val_visuals: true
+  val_visual_num_samples: 5
   resume: null
 
 wandb:
@@ -68,4 +81,4 @@ wandb:
   project: combustion-tsr
   entity: null
   run_name: null
-  tags: [autoencoder, combustion]
+  tags: [flow-matching, combustion, temporal-super-resolution, span5]
