@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-/mnt/bn/isp-traindata-lf3/liujinkun/miniforge3/bin/activate}"
+CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-/mnt/bn/embodied-lf3/liujinkun/miniforge3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/mnt/bn/embodied-lf3/liujinkun/envs/gld}"
 if [[ -f "${CONDA_ACTIVATE_SCRIPT}" && -d "${CONDA_ENV_PATH}" ]]; then
   # shellcheck disable=SC1090

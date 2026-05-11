@@ -8,12 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tflamediff.config import load_config
-from tflamediff.engine.train_diffusion import train
+from tflamediff.engine.train_flow_matching import train
 from tflamediff.utils.seed import seed_everything
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the combustion conditional latent diffusion model.")
+    parser = argparse.ArgumentParser(description="Train the combustion conditional latent flow matching model.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config.")
     parser.add_argument(
         "--override",

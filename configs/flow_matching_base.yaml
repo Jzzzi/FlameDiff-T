@@ -1,6 +1,6 @@
 experiment:
-  name: combustion_diffusion
-  output_dir: outputs/diffusion
+  name: combustion_flow
+  output_dir: outputs/flow
   seed: 42
 
 data:
@@ -15,10 +15,13 @@ data:
     val: 0.15
     test: 0.15
   split_seed: 7
-  batch_size: 4
-  num_workers: 0
+  batch_size: 96
+  num_workers: 8
+  prefetch_factor: 8
   file_cache_size: 1
-  trajectory_cache_size: 2
+  trajectory_cache_size: 32
+  preload_splits: [train, val]
+  preload_max_trajectories: 0
   normalization:
     mode: minmax
     min: 0.0
@@ -28,7 +31,7 @@ data:
 
 model:
   autoencoder:
-    checkpoint: outputs/autoencoder/checkpoints/best.pt
+    checkpoint: results/autoencoder/combustion-ae-v0/checkpoints/best.pt
     in_channels: 1
     base_channels: 64
     latent_channels: 8
@@ -44,11 +47,10 @@ model:
     num_frames: 10
     target_frames: 8
 
-diffusion:
-  timesteps: 1000
-  beta_start: 1.0e-4
-  beta_end: 2.0e-2
-  clip_denoised: false
+flow_matching:
+  sample_steps: 100
+  train_eps: 1.0e-5
+  time_scale: 1000.0
 
 optimizer:
   name: adamw
@@ -61,15 +63,16 @@ scheduler:
   min_lr: 1.0e-6
 
 trainer:
-  epochs: 200
+  epochs: 20000
   amp: true
   precision: bf16
   grad_clip_norm: 1.0
   log_every_steps: 50
-  val_every_steps: 1000
+  val_every_steps: 5000
   interval_val_batches: 16
   full_val_at_epoch_end: true
   save_val_visuals: true
+  sample_val_visuals: true
   resume: null
 
 wandb:
@@ -77,4 +80,4 @@ wandb:
   project: combustion-tsr
   entity: null
   run_name: null
-  tags: [diffusion, combustion, temporal-super-resolution]
+  tags: [flow-matching, combustion, temporal-super-resolution]

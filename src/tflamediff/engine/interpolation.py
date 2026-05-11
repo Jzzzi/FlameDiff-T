@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from tflamediff.engine.checkpoint import load_model_weights
-from tflamediff.models import ConditionalLatentDiT, FrameAutoencoder, GaussianDiffusion
+from tflamediff.models import ConditionalLatentDiT, FrameAutoencoder, RectifiedFlow
 
 
 def encode_sequence(autoencoder: FrameAutoencoder, frames: torch.Tensor) -> torch.Tensor:
@@ -33,7 +33,7 @@ def build_autoencoder(config: dict[str, Any]) -> FrameAutoencoder:
     )
 
 
-def build_diffusion_model(config: dict[str, Any], latent_size: int) -> ConditionalLatentDiT:
+def build_flow_model(config: dict[str, Any], latent_size: int) -> ConditionalLatentDiT:
     dit_cfg = config["model"]["dit"]
     ae_cfg = config["model"]["autoencoder"]
     return ConditionalLatentDiT(
@@ -50,13 +50,12 @@ def build_diffusion_model(config: dict[str, Any], latent_size: int) -> Condition
     )
 
 
-def build_diffusion_scheduler(config: dict[str, Any]) -> GaussianDiffusion:
-    diffusion_cfg = config["diffusion"]
-    return GaussianDiffusion(
-        timesteps=int(diffusion_cfg.get("timesteps", 1000)),
-        beta_start=float(diffusion_cfg.get("beta_start", 1e-4)),
-        beta_end=float(diffusion_cfg.get("beta_end", 2e-2)),
-        clip_denoised=bool(diffusion_cfg.get("clip_denoised", False)),
+def build_flow(config: dict[str, Any]) -> RectifiedFlow:
+    flow_cfg = config["flow_matching"]
+    return RectifiedFlow(
+        sample_steps=int(flow_cfg.get("sample_steps", 100)),
+        train_eps=float(flow_cfg.get("train_eps", 1e-5)),
+        time_scale=float(flow_cfg.get("time_scale", 1000.0)),
     )
 
 
@@ -67,7 +66,7 @@ def load_autoencoder_checkpoint(
     if not checkpoint_path:
         raise ValueError(
             "model.autoencoder.checkpoint must point to a trained autoencoder checkpoint "
-            "before diffusion training, inference, or evaluation."
+            "before flow matching training, inference, or evaluation."
         )
     load_model_weights(checkpoint_path, model, map_location=device)
 
@@ -75,13 +74,13 @@ def load_autoencoder_checkpoint(
 @torch.no_grad()
 def sample_sequence(
     autoencoder: FrameAutoencoder,
-    diffusion_model: ConditionalLatentDiT,
-    diffusion: GaussianDiffusion,
+    flow_model: ConditionalLatentDiT,
+    flow: RectifiedFlow,
     condition_frames: torch.Tensor,
     device: torch.device | str,
 ) -> torch.Tensor:
     autoencoder.eval()
-    diffusion_model.eval()
+    flow_model.eval()
     condition_frames = condition_frames.to(device)
     condition_latents = encode_sequence(autoencoder, condition_frames)
     target_shape = (
@@ -91,8 +90,8 @@ def sample_sequence(
         condition_latents.shape[3],
         condition_latents.shape[4],
     )
-    predicted_target_latents = diffusion.sample(
-        model=diffusion_model,
+    predicted_target_latents = flow.sample(
+        model=flow_model,
         condition_latents=condition_latents,
         target_shape=target_shape,
         device=device,

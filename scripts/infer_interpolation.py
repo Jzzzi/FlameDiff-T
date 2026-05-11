@@ -16,8 +16,8 @@ from tflamediff.data import build_combustion_datasets
 from tflamediff.engine.checkpoint import load_model_weights
 from tflamediff.engine.interpolation import (
     build_autoencoder,
-    build_diffusion_model,
-    build_diffusion_scheduler,
+    build_flow_model,
+    build_flow,
     sample_sequence,
 )
 from tflamediff.utils.io import load_frame_file
@@ -28,8 +28,8 @@ from tflamediff.utils.visualization import save_comparison_strip, save_gif, save
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run temporal interpolation from frame 0 and frame 9.")
-    parser.add_argument("--config", type=str, required=True, help="Path to diffusion YAML config.")
-    parser.add_argument("--diffusion-checkpoint", type=str, required=True, help="Path to diffusion checkpoint.")
+    parser.add_argument("--config", type=str, required=True, help="Path to flow matching YAML config.")
+    parser.add_argument("--flow-checkpoint", type=str, required=True, help="Path to flow checkpoint.")
     parser.add_argument("--autoencoder-checkpoint", type=str, default=None, help="Override autoencoder checkpoint path.")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--sample-index", type=int, default=0, help="Dataset sample index for inference.")
@@ -62,9 +62,9 @@ def main() -> None:
 
     autoencoder = build_autoencoder(config).to(device)
     load_model_weights(config["model"]["autoencoder"]["checkpoint"], autoencoder, map_location=device)
-    diffusion_model = build_diffusion_model(config, latent_size=latent_size).to(device)
-    load_model_weights(args.diffusion_checkpoint, diffusion_model, map_location=device)
-    diffusion = build_diffusion_scheduler(config).to(device)
+    flow_model = build_flow_model(config, latent_size=latent_size).to(device)
+    load_model_weights(args.flow_checkpoint, flow_model, map_location=device)
+    flow = build_flow(config).to(device)
 
     metadata = {"source": "external" if args.frame0 and args.frame9 else "dataset"}
     target = None
@@ -88,8 +88,8 @@ def main() -> None:
     with torch.no_grad():
         full_prediction = sample_sequence(
             autoencoder=autoencoder,
-            diffusion_model=diffusion_model,
-            diffusion=diffusion,
+            flow_model=flow_model,
+            flow=flow,
             condition_frames=condition,
             device=device,
         )[0]

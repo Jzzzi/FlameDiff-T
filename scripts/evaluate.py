@@ -17,8 +17,8 @@ from tflamediff.data import build_combustion_datasets, create_dataloader
 from tflamediff.engine.checkpoint import load_model_weights
 from tflamediff.engine.interpolation import (
     build_autoencoder,
-    build_diffusion_model,
-    build_diffusion_scheduler,
+    build_flow_model,
+    build_flow,
     sample_sequence,
 )
 from tflamediff.utils.io import write_csv
@@ -30,8 +30,8 @@ from tflamediff.utils.visualization import save_comparison_strip, save_gif
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate temporal interpolation metrics on a dataset split.")
-    parser.add_argument("--config", type=str, required=True, help="Path to diffusion YAML config.")
-    parser.add_argument("--diffusion-checkpoint", type=str, required=True, help="Path to diffusion checkpoint.")
+    parser.add_argument("--config", type=str, required=True, help="Path to flow matching YAML config.")
+    parser.add_argument("--flow-checkpoint", type=str, required=True, help="Path to flow checkpoint.")
     parser.add_argument("--autoencoder-checkpoint", type=str, default=None, help="Override autoencoder checkpoint path.")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--batch-size", type=int, default=1)
@@ -74,9 +74,9 @@ def main() -> None:
     )
     autoencoder = build_autoencoder(config).to(device)
     load_model_weights(config["model"]["autoencoder"]["checkpoint"], autoencoder, map_location=device)
-    diffusion_model = build_diffusion_model(config, latent_size=latent_size).to(device)
-    load_model_weights(args.diffusion_checkpoint, diffusion_model, map_location=device)
-    diffusion = build_diffusion_scheduler(config).to(device)
+    flow_model = build_flow_model(config, latent_size=latent_size).to(device)
+    load_model_weights(args.flow_checkpoint, flow_model, map_location=device)
+    flow = build_flow(config).to(device)
 
     metrics_rows: list[dict[str, object]] = []
     metric_values: list[dict[str, float]] = []
@@ -88,8 +88,8 @@ def main() -> None:
         condition = batch["condition"].to(device)
         full_prediction = sample_sequence(
             autoencoder=autoencoder,
-            diffusion_model=diffusion_model,
-            diffusion=diffusion,
+            flow_model=flow_model,
+            flow=flow,
             condition_frames=condition,
             device=device,
         )

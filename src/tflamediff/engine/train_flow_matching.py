@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -10,7 +11,7 @@ from tqdm import tqdm
 
 from tflamediff.config import ensure_output_structure
 from tflamediff.data import build_combustion_datasets, create_dataloader
-from tflamediff.engine.checkpoint import load_checkpoint, save_checkpoint
+from tflamediff.engine.checkpoint import load_checkpoint, save_checkpoint, unwrap_model
 from tflamediff.engine.distributed import (
     DistributedContext,
     barrier,
@@ -21,8 +22,8 @@ from tflamediff.engine.distributed import (
 )
 from tflamediff.engine.interpolation import (
     build_autoencoder,
-    build_diffusion_model,
-    build_diffusion_scheduler,
+    build_flow_model,
+    build_flow,
     decode_sequence,
     encode_sequence,
     load_autoencoder_checkpoint,
@@ -37,8 +38,9 @@ from tflamediff.engine.train_utils import (
     resolve_precision,
 )
 from tflamediff.engine.logger import WandbLogger
+from tflamediff.utils.metrics import compute_sequence_metrics
 from tflamediff.utils.tensor import tensor_to_numpy
-from tflamediff.utils.visualization import save_comparison_strip
+from tflamediff.utils.visualization import save_comparison_strip, save_sequence_strip
 
 
 def _autocast_context(device: str, enabled: bool, dtype: torch.dtype | None):
@@ -48,9 +50,9 @@ def _autocast_context(device: str, enabled: bool, dtype: torch.dtype | None):
 
 
 def _compute_loss(
-    diffusion_model: torch.nn.Module,
+    flow_model: torch.nn.Module,
     autoencoder: torch.nn.Module,
-    diffusion_scheduler,
+    flow,
     batch: dict[str, Any],
     device: str,
     amp_enabled: bool,
@@ -61,32 +63,31 @@ def _compute_loss(
     with torch.no_grad():
         condition_latents = encode_sequence(autoencoder, condition)
         target_latents = encode_sequence(autoencoder, target)
+
     noise = torch.randn_like(target_latents)
-    timesteps = torch.randint(
-        0, diffusion_scheduler.timesteps, (target_latents.shape[0],), device=device, dtype=torch.long
-    )
-    noisy_targets = diffusion_scheduler.q_sample(target_latents, timesteps, noise)
+    times = flow.sample_train_t(target_latents.shape[0], device=device)
+    noisy_targets = flow.interpolate(noise, target_latents, times)
+    target_velocity = flow.target_velocity(noise, target_latents)
+    timesteps = flow.model_time(times)
     with _autocast_context(device, amp_enabled, amp_dtype):
-        pred_noise = diffusion_model(
+        pred_velocity = flow_model(
             noisy_targets=noisy_targets,
             condition_latents=condition_latents,
             timesteps=timesteps,
         )
-        loss = F.mse_loss(pred_noise, noise)
-    predicted_x0 = diffusion_scheduler.predict_start_from_noise(noisy_targets, timesteps, pred_noise)
+        loss = F.mse_loss(pred_velocity, target_velocity)
     metrics = {"loss": float(loss.detach().item())}
     extras = {
         "condition": condition,
         "target": target,
-        "predicted_x0": predicted_x0,
     }
     return loss, metrics, extras
 
 
 def _run_validation(
-    diffusion_model,
+    flow_model,
     autoencoder,
-    diffusion_scheduler,
+    flow,
     loader,
     device: str,
     amp_enabled: bool,
@@ -94,7 +95,7 @@ def _run_validation(
     context: DistributedContext,
     max_batches: int | None = None,
 ) -> tuple[dict[str, float], dict[str, Any] | None]:
-    diffusion_model.eval()
+    flow_model.eval()
     total_loss = 0.0
     total_batches = 0
     preview = None
@@ -102,9 +103,9 @@ def _run_validation(
         for batch in loader:
             batch = move_batch_to_device(batch, device)
             loss, metrics, extras = _compute_loss(
-                diffusion_model=diffusion_model,
+                flow_model=flow_model,
                 autoencoder=autoencoder,
-                diffusion_scheduler=diffusion_scheduler,
+                flow=flow,
                 batch=batch,
                 device=device,
                 amp_enabled=amp_enabled,
@@ -113,17 +114,60 @@ def _run_validation(
             total_loss += metrics["loss"]
             total_batches += 1
             if preview is None:
-                decoded = tensor_to_numpy(decode_sequence(autoencoder, extras["predicted_x0"][:1]))
                 preview = {
                     "condition": tensor_to_numpy(extras["condition"][:1])[0],
                     "target": tensor_to_numpy(extras["target"][:1])[0],
-                    "prediction": decoded[0],
                 }
             if max_batches is not None and total_batches >= max_batches:
                 break
     metrics = {"loss": reduce_scalar(total_loss / max(total_batches, 1), context)}
-    diffusion_model.train()
+    flow_model.train()
     return metrics, preview
+
+
+@torch.no_grad()
+def _sample_validation_preview(
+    *,
+    flow_model,
+    autoencoder,
+    flow,
+    preview: dict[str, Any] | None,
+    device: str,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype | None,
+) -> dict[str, Any] | None:
+    if preview is None:
+        return None
+
+    was_training = flow_model.training
+    flow_model.eval()
+    autoencoder.eval()
+
+    condition = torch.from_numpy(preview["condition"][None]).to(device=device, dtype=torch.float32)
+    with _autocast_context(device, amp_enabled, amp_dtype):
+        condition_latents = encode_sequence(autoencoder, condition)
+        target_shape = (
+            condition.shape[0],
+            int(preview["target"].shape[0]),
+            condition_latents.shape[2],
+            condition_latents.shape[3],
+            condition_latents.shape[4],
+        )
+        predicted_target_latents = flow.sample(
+            model=unwrap_model(flow_model),
+            condition_latents=condition_latents,
+            target_shape=target_shape,
+            device=device,
+        )
+        prediction = decode_sequence(autoencoder, predicted_target_latents)
+
+    if was_training:
+        flow_model.train()
+    return {
+        "condition": preview["condition"],
+        "target": preview["target"],
+        "prediction": tensor_to_numpy(prediction)[0],
+    }
 
 
 def train(config: dict[str, Any]) -> None:
@@ -140,14 +184,30 @@ def _save_validation_visuals(
     normalizer,
     output_paths,
     tag: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, float]]:
     if preview is None:
-        return {}
+        return {}, {}
     condition = normalizer.denormalize(preview["condition"])
     prediction = normalizer.denormalize(preview["prediction"])
     target = normalizer.denormalize(preview["target"])
     shared_vmin = float(min(condition.min(), prediction.min(), target.min()))
     shared_vmax = float(max(condition.max(), prediction.max(), target.max()))
+    full_target = np.concatenate([condition[:1], target, condition[1:]], axis=0)
+    full_prediction = np.concatenate([condition[:1], prediction, condition[1:]], axis=0)
+    gt_image = save_sequence_strip(
+        full_target,
+        output_paths["visuals"] / f"{tag}_gt.png",
+        title=f"Flow Matching Ground Truth ({tag})",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
+    )
+    sample_image = save_sequence_strip(
+        full_prediction,
+        output_paths["visuals"] / f"{tag}_sample.png",
+        title=f"Flow Matching Sample ({tag})",
+        vmin=shared_vmin,
+        vmax=shared_vmax,
+    )
     comparison_image = save_comparison_strip(
         condition,
         prediction,
@@ -156,14 +216,19 @@ def _save_validation_visuals(
         vmin=shared_vmin,
         vmax=shared_vmax,
     )
-    return {"comparison": comparison_image}
+    sample_metrics = compute_sequence_metrics(
+        prediction=prediction,
+        target=target,
+        data_range=normalizer.data_range,
+    )
+    return {"gt": gt_image, "sample": sample_image, "comparison": comparison_image}, sample_metrics
 
 
 def _run_and_log_validation(
     *,
-    diffusion_model,
+    flow_model,
     autoencoder,
-    diffusion_scheduler,
+    flow,
     loader,
     device: str,
     amp_enabled: bool,
@@ -184,11 +249,12 @@ def _run_and_log_validation(
     trigger: str,
     max_batches: int | None,
     save_visuals: bool,
+    sample_val_visuals: bool,
 ) -> float:
     val_metrics, preview = _run_validation(
-        diffusion_model=diffusion_model,
+        flow_model=flow_model,
         autoencoder=autoencoder,
-        diffusion_scheduler=diffusion_scheduler,
+        flow=flow,
         loader=loader,
         device=device,
         amp_enabled=amp_enabled,
@@ -197,7 +263,28 @@ def _run_and_log_validation(
         max_batches=max_batches,
     )
     barrier(context)
+    visual_images: dict[str, Any] = {}
+    sample_metrics: dict[str, float] = {}
+    if is_main_process(context) and save_visuals and sample_val_visuals:
+        tag = f"flow_{trigger}_epoch_{epoch:04d}_step_{global_step:08d}"
+        sampled_preview = _sample_validation_preview(
+            flow_model=flow_model,
+            autoencoder=autoencoder,
+            flow=flow,
+            preview=preview,
+            device=device,
+            amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
+        )
+        visual_images, sample_metrics = _save_validation_visuals(
+            preview=sampled_preview,
+            normalizer=normalizer,
+            output_paths=output_paths,
+            tag=tag,
+        )
+
     if not is_main_process(context):
+        barrier(context)
         return best_val
 
     payload = {
@@ -206,28 +293,30 @@ def _run_and_log_validation(
         "epoch": epoch,
         "step": global_step,
         **val_metrics,
+        **{f"sample_{key}": value for key, value in sample_metrics.items()},
         "lr": current_learning_rate(optimizer),
     }
     logger.log(payload)
     if writer is not None:
         for key, value in val_metrics.items():
             writer.add_scalar(f"val/{key}", value, global_step)
+        for key, value in sample_metrics.items():
+            writer.add_scalar(f"val_sample/{key}", value, global_step)
     if wandb_logger is not None:
-        wandb_logger.log(
-            {
-                "val/loss": val_metrics["loss"],
-                "epoch": epoch,
-            },
-            step=global_step,
-        )
+        wandb_payload = {"val/loss": val_metrics["loss"], "epoch": epoch}
+        wandb_payload.update({f"val_sample/{key}": value for key, value in sample_metrics.items()})
+        wandb_logger.log(wandb_payload, step=global_step)
 
-    print(f"[diffusion][{trigger}][epoch={epoch}][step={global_step}] {format_metrics(val_metrics)}")
+    print(
+        f"[flow][{trigger}][epoch={epoch}][step={global_step}] "
+        f"{format_metrics({**val_metrics, **{f'sample_{key}': value for key, value in sample_metrics.items()}})}"
+    )
     is_best = val_metrics["loss"] < best_val
     if is_best:
         best_val = val_metrics["loss"]
     save_checkpoint(
         output_paths["checkpoints"] / "last.pt",
-        model=diffusion_model,
+        model=flow_model,
         optimizer=optimizer,
         scheduler=scheduler,
         scaler=scaler,
@@ -239,7 +328,7 @@ def _run_and_log_validation(
     if is_best:
         save_checkpoint(
             output_paths["checkpoints"] / "best.pt",
-            model=diffusion_model,
+            model=flow_model,
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler,
@@ -248,24 +337,25 @@ def _run_and_log_validation(
             config=config,
             extra={"best_val": best_val},
         )
-    if save_visuals:
-        tag = f"diffusion_{trigger}_epoch_{epoch:04d}_step_{global_step:08d}"
-        visual_images = _save_validation_visuals(
-            preview=preview,
-            normalizer=normalizer,
-            output_paths=output_paths,
-            tag=tag,
+    if wandb_logger is not None and visual_images:
+        wandb_logger.log(
+            {
+                "val_visual/gt": wandb_logger.image(
+                    visual_images["gt"],
+                    caption=f"Flow Matching GT | trigger={trigger} | epoch={epoch} | step={global_step}",
+                ),
+                "val_visual/sample": wandb_logger.image(
+                    visual_images["sample"],
+                    caption=f"Flow Matching Sample | trigger={trigger} | epoch={epoch} | step={global_step}",
+                ),
+                "val_visual/comparison": wandb_logger.image(
+                    visual_images["comparison"],
+                    caption=f"Flow Matching Comparison | trigger={trigger} | epoch={epoch} | step={global_step}",
+                ),
+            },
+            step=global_step,
         )
-        if wandb_logger is not None and visual_images:
-            wandb_logger.log(
-                {
-                    "val_visual/comparison": wandb_logger.image(
-                        visual_images["comparison"],
-                        caption=f"Diffusion Val | trigger={trigger} | epoch={epoch} | step={global_step}",
-                    )
-                },
-                step=global_step,
-            )
+    barrier(context)
     return best_val
 
 
@@ -279,6 +369,8 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
 
     batch_size = int(config["data"].get("batch_size", 4))
     num_workers = int(config["data"].get("num_workers", 0))
+    prefetch_factor = config["data"].get("prefetch_factor")
+    prefetch_factor = None if prefetch_factor in {None, 0} else int(prefetch_factor)
     train_loader, train_sampler = create_dataloader(
         train_dataset,
         batch_size=batch_size,
@@ -286,6 +378,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         shuffle=True,
         distributed=context.enabled,
         drop_last=True,
+        prefetch_factor=prefetch_factor,
     )
     val_loader, _ = create_dataloader(
         val_dataset,
@@ -294,6 +387,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         shuffle=False,
         distributed=context.enabled,
         drop_last=False,
+        prefetch_factor=prefetch_factor,
     )
 
     device = context.device
@@ -304,18 +398,18 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         parameter.requires_grad = False
 
     latent_size = int(store.trajectories[0].shape_h) // autoencoder.downsample_factor
-    diffusion_model = build_diffusion_model(config, latent_size=latent_size).to(device)
-    diffusion_scheduler = build_diffusion_scheduler(config).to(device)
+    flow_model = build_flow_model(config, latent_size=latent_size).to(device)
+    flow = build_flow(config).to(device)
     if context.enabled:
-        diffusion_model = DistributedDataParallel(
-            diffusion_model,
+        flow_model = DistributedDataParallel(
+            flow_model,
             device_ids=[context.local_rank] if device.startswith("cuda") else None,
         )
 
-    optimizer = build_optimizer(diffusion_model.parameters(), config["optimizer"])
+    optimizer = build_optimizer(flow_model.parameters(), config["optimizer"])
     scheduler = build_scheduler(optimizer, config.get("scheduler", {"name": "none"}), int(config["trainer"]["epochs"]))
     amp_enabled, amp_dtype = resolve_precision(config["trainer"])
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and device.startswith("cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and device.startswith("cuda"))
 
     start_epoch = 0
     global_step = 0
@@ -324,7 +418,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
     if resume_path:
         checkpoint = load_checkpoint(
             resume_path,
-            model=diffusion_model,
+            model=flow_model,
             optimizer=optimizer,
             scheduler=scheduler,
             scaler=scaler,
@@ -334,7 +428,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         global_step = int(checkpoint.get("step", 0))
         best_val = float(checkpoint.get("extra", {}).get("best_val", best_val))
 
-    logger = JsonlLogger(output_paths["logs"] / "diffusion_train.jsonl")
+    logger = JsonlLogger(output_paths["logs"] / "flow_matching_train.jsonl")
     writer = maybe_build_summary_writer(output_paths["logs"]) if is_main_process(context) else None
     wandb_logger = WandbLogger(config, output_paths["root"]) if is_main_process(context) else None
     log_every = int(config["trainer"].get("log_every_steps", 50))
@@ -344,20 +438,21 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
     interval_val_batches = None if interval_val_batches in {None, 0} else int(interval_val_batches)
     full_val_at_epoch_end = bool(config["trainer"].get("full_val_at_epoch_end", True))
     save_val_visuals = bool(config["trainer"].get("save_val_visuals", True))
+    sample_val_visuals = bool(config["trainer"].get("sample_val_visuals", save_val_visuals))
 
     for epoch in range(start_epoch, int(config["trainer"]["epochs"])):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
-        diffusion_model.train()
-        progress = tqdm(train_loader, disable=not is_main_process(context), desc=f"DiT epoch {epoch}")
+        flow_model.train()
+        progress = tqdm(train_loader, disable=not is_main_process(context), desc=f"Flow epoch {epoch}")
         last_interval_validation_step = -1
         for batch in progress:
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
             loss, metrics, _ = _compute_loss(
-                diffusion_model=diffusion_model,
+                flow_model=flow_model,
                 autoencoder=autoencoder,
-                diffusion_scheduler=diffusion_scheduler,
+                flow=flow,
                 batch=batch,
                 device=device,
                 amp_enabled=amp_enabled,
@@ -366,7 +461,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
             scaler.scale(loss).backward()
             if grad_clip > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(diffusion_model.parameters(), grad_clip)
+                torch.nn.utils.clip_grad_norm_(flow_model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
             global_step += 1
@@ -395,9 +490,9 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
 
             if val_every_steps > 0 and global_step % val_every_steps == 0:
                 best_val = _run_and_log_validation(
-                    diffusion_model=diffusion_model,
+                    flow_model=flow_model,
                     autoencoder=autoencoder,
-                    diffusion_scheduler=diffusion_scheduler,
+                    flow=flow,
                     loader=val_loader,
                     device=device,
                     amp_enabled=amp_enabled,
@@ -418,9 +513,10 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
                     trigger="step",
                     max_batches=interval_val_batches,
                     save_visuals=save_val_visuals,
+                    sample_val_visuals=sample_val_visuals,
                 )
                 last_interval_validation_step = global_step
-                diffusion_model.train()
+                flow_model.train()
 
         if scheduler is not None:
             scheduler.step()
@@ -428,9 +524,9 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
             last_interval_validation_step == global_step and interval_val_batches is None
         ):
             best_val = _run_and_log_validation(
-                diffusion_model=diffusion_model,
+                flow_model=flow_model,
                 autoencoder=autoencoder,
-                diffusion_scheduler=diffusion_scheduler,
+                flow=flow,
                 loader=val_loader,
                 device=device,
                 amp_enabled=amp_enabled,
@@ -451,6 +547,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
                 trigger="epoch",
                 max_batches=None,
                 save_visuals=save_val_visuals,
+                sample_val_visuals=sample_val_visuals,
             )
     if writer is not None:
         writer.close()

@@ -18,17 +18,21 @@ def timestep_embedding(timesteps: torch.Tensor, dim: int, max_period: int = 1000
     return embedding
 
 
-class TransformerBlock(nn.Module):
+def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+class AdaLNZeroTransformerBlock(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, dropout: float) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_size)
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = nn.MultiheadAttention(
             embed_dim=hidden_size,
             num_heads=num_heads,
             dropout=dropout,
             batch_first=True,
         )
-        self.norm2 = nn.LayerNorm(hidden_size)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden = int(hidden_size * mlp_ratio)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_hidden),
@@ -36,12 +40,36 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(mlp_hidden, hidden_size),
         )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 6 * hidden_size),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        attn_out, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
+    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
+            condition
+        ).chunk(6, dim=1)
+        attn_input = modulate(self.norm1(x), shift_msa, scale_msa)
+        attn_out, _ = self.attn(attn_input, attn_input, attn_input, need_weights=False)
+        x = x + gate_msa.unsqueeze(1) * attn_out
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
+
+
+class AdaLNFinalLayer(nn.Module):
+    def __init__(self, hidden_size: int, output_size: int) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(hidden_size, output_size)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(hidden_size, 2 * hidden_size),
+        )
+
+    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        shift, scale = self.adaLN_modulation(condition).chunk(2, dim=1)
+        x = modulate(self.norm(x), shift, scale)
+        return self.linear(x)
 
 
 class ConditionalLatentDiT(nn.Module):
@@ -73,7 +101,6 @@ class ConditionalLatentDiT(nn.Module):
         self.patch_embed = nn.Conv2d(
             latent_channels, hidden_size, kernel_size=patch_size, stride=patch_size
         )
-        self.output_proj = nn.Linear(hidden_size, latent_channels * patch_size * patch_size)
         self.time_mlp = nn.Sequential(
             nn.Linear(hidden_size, hidden_size * 4),
             nn.SiLU(),
@@ -86,7 +113,7 @@ class ConditionalLatentDiT(nn.Module):
         )
         self.blocks = nn.ModuleList(
             [
-                TransformerBlock(
+                AdaLNZeroTransformerBlock(
                     hidden_size=hidden_size,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
@@ -95,13 +122,23 @@ class ConditionalLatentDiT(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.norm = nn.LayerNorm(hidden_size)
+        self.final_layer = AdaLNFinalLayer(
+            hidden_size=hidden_size,
+            output_size=latent_channels * patch_size * patch_size,
+        )
         self._reset_parameters()
 
     def _reset_parameters(self) -> None:
         nn.init.normal_(self.pos_embed, std=0.02)
         nn.init.normal_(self.frame_embed.weight, std=0.02)
         nn.init.normal_(self.role_embed.weight, std=0.02)
+        for block in self.blocks:
+            nn.init.zeros_(block.adaLN_modulation[-1].weight)
+            nn.init.zeros_(block.adaLN_modulation[-1].bias)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.final_layer.adaLN_modulation[-1].bias)
+        nn.init.zeros_(self.final_layer.linear.weight)
+        nn.init.zeros_(self.final_layer.linear.bias)
 
     def forward(
         self,
@@ -136,14 +173,12 @@ class ConditionalLatentDiT(nn.Module):
         embedded = embedded + self.role_embed(role_ids)[None, :, None, :]
         embedded = embedded + self.pos_embed.view(1, frame_count, self.num_patches, self.hidden_size)
 
-        time_embed = self.time_mlp(timestep_embedding(timesteps, self.hidden_size))
-        embedded = embedded + time_embed[:, None, None, :]
+        condition = self.time_mlp(timestep_embedding(timesteps, self.hidden_size))
         tokens = embedded.reshape(batch_size, frame_count * self.num_patches, self.hidden_size)
 
         for block in self.blocks:
-            tokens = block(tokens)
-        tokens = self.norm(tokens)
-        tokens = self.output_proj(tokens)
+            tokens = block(tokens, condition)
+        tokens = self.final_layer(tokens, condition)
         tokens = tokens.reshape(
             batch_size,
             frame_count,
@@ -162,4 +197,3 @@ class ConditionalLatentDiT(nn.Module):
             self.latent_size,
         )
         return frames[:, 1:-1]
-

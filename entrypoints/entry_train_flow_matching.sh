@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-/mnt/bn/isp-traindata-lf3/liujinkun/miniforge3/bin/activate}"
+CONDA_ACTIVATE_SCRIPT="${CONDA_ACTIVATE_SCRIPT:-/mnt/bn/embodied-lf3/liujinkun/miniforge3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/mnt/bn/embodied-lf3/liujinkun/envs/gld}"
 if [[ -f "${CONDA_ACTIVATE_SCRIPT}" && -d "${CONDA_ENV_PATH}" ]]; then
   # shellcheck disable=SC1090
@@ -26,22 +26,22 @@ export WANDB_KEY="${WANDB_KEY:-${WANDB_API_KEY}}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export PYTHONPATH="src:${PYTHONPATH:-}"
 
-DEFAULT_EXP_NAME="combustion-diffusion-v0"
-EXP_NAME="${EXP_NAME:-${DEFAULT_EXP_NAME}}"
-CONFIG_PATH="${CONFIG_PATH:-configs/diffusion_base.yaml}"
-RESULTS_DIR="${RESULTS_DIR:-results/diffusion}"
+DEFAULT_EXP_NAME="combustion-flow-v0"
+EXP_NAME_BASE="${EXP_NAME:-${DEFAULT_EXP_NAME}}"
+CONFIG_PATH="${CONFIG_PATH:-configs/flow_matching_base.yaml}"
+RESULTS_DIR="${RESULTS_DIR:-results/flow}"
 PRECISION="${PRECISION:-bf16}"
 RESUME="${RESUME:-false}"
 CKPT_PATH="${CKPT_PATH:-}"
-AUTOENCODER_CKPT="${AUTOENCODER_CKPT:-outputs/autoencoder/checkpoints/best.pt}"
-LOG_ROOT="${LOG_ROOT:-logs/diffusion}"
+AUTOENCODER_CKPT="${AUTOENCODER_CKPT:-results/autoencoder/combustion-ae-v0/checkpoints/best.pt}"
+LOG_ROOT="${LOG_ROOT:-logs/flow}"
 WANDB_ENABLED="${WANDB_ENABLED:-true}"
 EXTRA_OVERRIDES=("$@")
 
-mkdir -p "${LOG_ROOT}" "${RESULTS_DIR}"
-
 num_gpus="${NPROC_PER_NODE:-${ARNOLD_WORKER_GPU:-1}}"
 num_nodes="${NNODES:-${ARNOLD_WORKER_NUM:-1}}"
+total_gpus=$((num_gpus * num_nodes))
+EXP_NAME="${EXP_NAME_BASE}-gpus-${total_gpus}"
 node_rank="${NODE_RANK:-${ARNOLD_ID:-0}}"
 master_addr="${MASTER_ADDR:-${ARNOLD_WORKER_0_HOST:-127.0.0.1}}"
 if [[ -n "${MASTER_PORT:-}" ]]; then
@@ -52,6 +52,8 @@ elif [[ -n "${ARNOLD_WORKER_0_PORT:-}" ]]; then
 else
   master_port=29500
 fi
+
+mkdir -p "${LOG_ROOT}" "${RESULTS_DIR}"
 
 case "${RESUME,,}" in
   1|true|yes|y) RESUME_ENABLED="true" ;;
@@ -72,7 +74,7 @@ else
   WANDB_ENABLED_BOOL="false"
 fi
 
-echo "--- Combustion Diffusion Cluster Launch ---"
+echo "--- Combustion Flow Matching Cluster Launch ---"
 echo "Experiment Name: ${EXP_NAME}"
 echo "Config Path: ${CONFIG_PATH}"
 echo "Results Dir: ${RESULTS_DIR}"
@@ -81,6 +83,7 @@ echo "Precision: ${PRECISION}"
 echo "Autoencoder ckpt: ${AUTOENCODER_CKPT}"
 echo "Num GPUs / node: ${num_gpus}"
 echo "Num nodes: ${num_nodes}"
+echo "Total GPUs: ${total_gpus}"
 echo "Node rank: ${node_rank}"
 echo "Master addr: ${master_addr}"
 echo "Master port: ${master_port}"
@@ -101,7 +104,7 @@ cmd=(
   --node_rank "${node_rank}"
   --master_addr "${master_addr}"
   --master_port "${master_port}"
-  scripts/train_diffusion.py
+  scripts/train_flow_matching.py
   --config "${CONFIG_PATH}"
   --override
   "experiment.name=${EXP_NAME}"

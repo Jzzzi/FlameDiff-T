@@ -11,7 +11,7 @@ def save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None,
     scheduler: Any,
-    scaler: torch.cuda.amp.GradScaler | None,
+    scaler: Any | None,
     epoch: int,
     step: int,
     config: dict[str, Any],
@@ -37,7 +37,7 @@ def load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
     scheduler: Any = None,
-    scaler: torch.cuda.amp.GradScaler | None = None,
+    scaler: Any | None = None,
     map_location: str | torch.device = "cpu",
 ) -> dict[str, Any]:
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
@@ -62,4 +62,3 @@ def load_model_weights(
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if hasattr(model, "module") else model
-

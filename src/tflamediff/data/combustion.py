@@ -121,6 +121,10 @@ class CombustionTrajectoryStore:
         self.trajectories = self._scan_metadata()
         self._trajectory_index = {meta.sim_id: meta for meta in self.trajectories}
 
+    def preload_trajectories(self, sim_ids: list[str]) -> None:
+        for sim_id in sim_ids:
+            self.get_trajectory(sim_id)
+
     @staticmethod
     def _import_pyarrow():
         try:
@@ -281,6 +285,18 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
         split_ratios=data_config.get("splits", {"train": 0.7, "val": 0.15, "test": 0.15}),
         seed=int(data_config.get("split_seed", 0)),
     )
+    preload_splits = set(data_config.get("preload_splits", []))
+    preload_limit = data_config.get("preload_max_trajectories")
+    preload_limit = None if preload_limit in {None, 0} else int(preload_limit)
+    if preload_splits:
+        preload_ids: list[str] = []
+        for split_name in ("train", "val", "test"):
+            if split_name not in preload_splits:
+                continue
+            preload_ids.extend(split_ids[split_name])
+        if preload_limit is not None:
+            preload_ids = preload_ids[:preload_limit]
+        store.preload_trajectories(preload_ids)
 
     norm_config = dict(data_config.get("normalization", {}))
     if norm_config.get("auto_compute", False):
@@ -321,18 +337,24 @@ def create_dataloader(
     shuffle: bool,
     distributed: bool,
     drop_last: bool = False,
+    prefetch_factor: int | None = None,
 ) -> tuple[DataLoader, DistributedSampler | None]:
     sampler = None
     if distributed:
         sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=drop_last)
+    loader_kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": shuffle and sampler is None,
+        "sampler": sampler,
+        "num_workers": num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": num_workers > 0,
+        "drop_last": drop_last,
+    }
+    if num_workers > 0 and prefetch_factor is not None:
+        loader_kwargs["prefetch_factor"] = int(prefetch_factor)
     loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle and sampler is None,
-        sampler=sampler,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-        drop_last=drop_last,
+        **loader_kwargs,
     )
     return loader, sampler

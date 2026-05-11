@@ -291,6 +291,8 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
 
     batch_size = int(config["data"].get("batch_size", 8))
     num_workers = int(config["data"].get("num_workers", 0))
+    prefetch_factor = config["data"].get("prefetch_factor")
+    prefetch_factor = None if prefetch_factor in {None, 0} else int(prefetch_factor)
     train_loader, train_sampler = create_dataloader(
         train_dataset,
         batch_size=batch_size,
@@ -298,6 +300,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         shuffle=True,
         distributed=context.enabled,
         drop_last=True,
+        prefetch_factor=prefetch_factor,
     )
     val_loader, _ = create_dataloader(
         val_dataset,
@@ -306,6 +309,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
         shuffle=False,
         distributed=context.enabled,
         drop_last=False,
+        prefetch_factor=prefetch_factor,
     )
 
     device = context.device
@@ -316,7 +320,7 @@ def _train_impl(config: dict[str, Any], context: DistributedContext) -> None:
     optimizer = build_optimizer(model.parameters(), config["optimizer"])
     scheduler = build_scheduler(optimizer, config.get("scheduler", {"name": "none"}), int(config["trainer"]["epochs"]))
     amp_enabled, amp_dtype = resolve_precision(config["trainer"])
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled and device.startswith("cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and device.startswith("cuda"))
 
     start_epoch = 0
     global_step = 0

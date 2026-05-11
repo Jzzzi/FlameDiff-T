@@ -17,8 +17,11 @@ data:
   split_seed: 7
   batch_size: 32
   num_workers: 8
+  prefetch_factor: 8
   file_cache_size: 1
-  trajectory_cache_size: 2
+  trajectory_cache_size: 32
+  preload_splits: [train, val]
+  preload_max_trajectories: 0
   normalization:
     mode: minmax
     min: 0.0
