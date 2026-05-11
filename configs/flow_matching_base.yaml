@@ -63,14 +63,14 @@ scheduler:
   min_lr: 1.0e-6
 
 trainer:
-  epochs: 20000
+  epochs: 200000000
   amp: true
   precision: bf16
   grad_clip_norm: 1.0
   log_every_steps: 50
-  val_every_steps: 5000
+  val_every_steps: 1000
   interval_val_batches: 16
-  full_val_at_epoch_end: true
+  full_val_at_epoch_end: false
   save_val_visuals: true
   sample_val_visuals: true
   resume: null
