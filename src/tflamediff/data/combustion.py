@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fractions import Fraction
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -205,15 +206,16 @@ class CombustionWindowDataset(Dataset):
         stride: int = 1,
         condition_indices: tuple[int, int] = (0, 9),
         target_indices: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8),
+        windows: list[WindowMeta] | None = None,
     ) -> None:
         self.store = store
-        self.sim_ids = sim_ids
+        self.sim_ids = sorted({window.sim_id for window in windows}) if windows is not None else sim_ids
         self.normalizer = normalizer
         self.window_size = int(window_size)
         self.stride = int(stride)
         self.condition_indices = condition_indices
         self.target_indices = target_indices
-        self.windows = self._build_windows()
+        self.windows = list(windows) if windows is not None else self._build_windows()
 
     def _build_windows(self) -> list[WindowMeta]:
         windows: list[WindowMeta] = []
@@ -246,27 +248,45 @@ class CombustionWindowDataset(Dataset):
         }
 
 
-def split_trajectories(
-    sim_ids: list[str], split_ratios: dict[str, float]
-) -> dict[str, list[str]]:
-    if not math.isclose(sum(split_ratios.values()), 1.0, rel_tol=1e-6, abs_tol=1e-6):
-        raise ValueError(f"Split ratios must sum to 1.0, got: {split_ratios}")
-    sim_ids = sorted(sim_ids)
+def _split_cycle(split_ratios: dict[str, float]) -> list[str]:
+    split_names = ("train", "val", "test")
+    weights = [Fraction(str(split_ratios[name])).limit_denominator(1000) for name in split_names]
+    if any(weight <= 0 for weight in weights):
+        raise ValueError(f"Split ratios must be positive, got: {split_ratios}")
+    total_weight = sum(weights)
+    normalized = [weight / total_weight for weight in weights]
+    denominator_lcm = 1
+    for weight in normalized:
+        denominator_lcm = math.lcm(denominator_lcm, weight.denominator)
+    counts = [int(weight * denominator_lcm) for weight in normalized]
+    count_gcd = counts[0]
+    for count in counts[1:]:
+        count_gcd = math.gcd(count_gcd, count)
+    counts = [count // count_gcd for count in counts]
+    cycle: list[str] = []
+    for split_name, count in zip(split_names, counts, strict=True):
+        cycle.extend([split_name] * count)
+    return cycle
 
-    total = len(sim_ids)
-    train_end = int(total * split_ratios["train"])
-    val_end = train_end + int(total * split_ratios["val"])
 
-    splits = {
-        "train": sim_ids[:train_end],
-        "val": sim_ids[train_end:val_end],
-        "test": sim_ids[val_end:],
-    }
-    if not splits["val"]:
-        splits["val"] = splits["train"][-1:]
-    if not splits["test"]:
-        splits["test"] = splits["train"][-1:]
-    return splits
+def split_windows_within_trajectories(
+    store: CombustionTrajectoryStore,
+    sim_ids: list[str],
+    split_ratios: dict[str, float],
+    window_size: int,
+    stride: int,
+) -> dict[str, list[WindowMeta]]:
+    cycle = _split_cycle(split_ratios)
+    split_windows: dict[str, list[WindowMeta]] = {"train": [], "val": [], "test": []}
+    for sim_id in sorted(sim_ids):
+        meta = store.get_meta(sim_id)
+        max_start = meta.shape_t - window_size
+        if max_start < 0:
+            continue
+        for window_index, start_index in enumerate(range(0, max_start + 1, stride)):
+            split_name = cycle[window_index % len(cycle)]
+            split_windows[split_name].append(WindowMeta(sim_id=sim_id, start_index=start_index))
+    return split_windows
 
 
 def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
@@ -277,11 +297,19 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
         trajectory_cache_size=data_config.get("trajectory_cache_size", 2),
     )
     sim_ids = store.list_sim_ids()
+    window_splits: dict[str, list[WindowMeta]] | None = None
     if bool(data_config.get("split_sets", False)):
-        split_ids = split_trajectories(
+        window_splits = split_windows_within_trajectories(
+            store=store,
             sim_ids=sim_ids,
             split_ratios=data_config.get("splits", {"train": 0.7, "val": 0.15, "test": 0.15}),
+            window_size=int(data_config.get("window_size", 10)),
+            stride=int(data_config.get("stride", 1)),
         )
+        split_ids = {
+            split: sorted({window.sim_id for window in windows})
+            for split, windows in window_splits.items()
+        }
     else:
         split_ids = {"train": sim_ids, "val": sim_ids, "test": sim_ids}
     preload_splits = set(data_config.get("preload_splits", []))
@@ -293,6 +321,7 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
             if split_name not in preload_splits:
                 continue
             preload_ids.extend(split_ids[split_name])
+        preload_ids = list(dict.fromkeys(preload_ids))
         if preload_limit is not None:
             preload_ids = preload_ids[:preload_limit]
         store.preload_trajectories(preload_ids)
@@ -309,8 +338,9 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
     else:
         normalizer = CombustionNormalizer(norm_config)
 
-    datasets = {
-        split: CombustionWindowDataset(
+    datasets = {}
+    for split, split_sim_ids in split_ids.items():
+        datasets[split] = CombustionWindowDataset(
             store=store,
             sim_ids=split_sim_ids,
             normalizer=normalizer,
@@ -318,13 +348,13 @@ def build_combustion_datasets(data_config: dict[str, Any]) -> dict[str, Any]:
             stride=int(data_config.get("stride", 1)),
             condition_indices=tuple(data_config.get("condition_indices", [0, 9])),
             target_indices=tuple(data_config.get("target_indices", [1, 2, 3, 4, 5, 6, 7, 8])),
+            windows=window_splits[split] if window_splits is not None else None,
         )
-        for split, split_sim_ids in split_ids.items()
-    }
     return {
         "store": store,
         "normalizer": normalizer,
         "splits": split_ids,
+        "window_splits": window_splits,
         "datasets": datasets,
     }
 

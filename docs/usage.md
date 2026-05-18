@@ -30,7 +30,7 @@ python scripts/inspect_combustion_data.py --config configs/autoencoder_base.yaml
 
 说明：
 
-- 数据按 trajectory 级别划分 train / val / test，避免同一条长序列泄漏到不同 split。
+- 默认 `data.split_sets=false`，train / val / test 都使用全量数据；如设为 `true`，会在每条 trajectory 内按 window 周期划分 train / val / test。
 - `window_size=10`、`stride=1` 默认在 YAML 中配置。
 - 归一化由 `data.normalization` 控制，默认使用 `[0, 1]` min-max；如需自动统计训练集范围，可将 `auto_compute` 设为 `true`。
 - `data.preload_splits` 和 `data.prefetch_factor` 用于减少训练时 Arrow 读取导致的 GPU 空载；默认会预加载 train/val trajectory 到内存并提高 DataLoader 预取深度。
@@ -145,8 +145,8 @@ python scripts/evaluate.py \
 
 - `data.dataset_root`: RealPDEBench 根目录
 - `data.window_size` / `data.stride`: 切窗长度和步长
-- `data.split_sets`: 是否按 trajectory 划分 train/val/test；默认 `false` 表示全量数据用于训练，并在训练集上 validation
-- `data.splits`: `data.split_sets=true` 时使用的 trajectory 级别切分比例
+- `data.split_sets`: 是否在每条 trajectory 内划分 train/val/test；默认 `false` 表示全量数据用于训练，并在训练集上 validation
+- `data.splits`: `data.split_sets=true` 时使用的 window 周期切分比例，例如 `7/2/1` 表示每条轨迹内 7 个 train window、2 个 val window、1 个 test window，然后重复
 - `data.normalization`: 归一化模式和参数
 - `model.autoencoder.*`: AE 编解码器结构
 - `model.dit.*`: latent DiT 的 patch、宽度、层数、头数
